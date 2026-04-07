@@ -1,6 +1,6 @@
 ---
-title: "Building TradingGoose Market: <br> Why We Built Our Own Ticker Identity System"
-description: "How building data connectors across Alpaca, Yahoo Finance, and Finnhub revealed a fragmented ticker identity problem — and why we built an open, self-hostable canonical market data platform to solve it."
+title: "Building TradingGoose-Market: \n Why We Built Our Own Ticker Identity System"
+description: "How building data connectors across Alpaca, Yahoo Finance, and Finnhub revealed a fragmented ticker identity problem — and why we built an open source, self-hostable canonical market data platform to solve it."
 date: "2026-04-07"
 image: "cover.png"
 published: true
@@ -11,8 +11,8 @@ tags:
   - open-source
 authors:
   - github: "BWJ2310"
-    name: "TradingGoose Team"
-    x: "tradinggoose"
+    name: "Bruzzz"
+    x: "BruzWJ"
 ---
 
 When we started building TradingGoose, the first thing we needed was market data. Real-time quotes, historical bars, fundamentals — the raw material for any trading application. Simple enough: pick a data provider, call their API, done.
