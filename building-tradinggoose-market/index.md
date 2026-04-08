@@ -1,5 +1,5 @@
 ---
-title: "Building TradingGoose-Market: \n Why We Built Our Own Ticker Identity System"
+title: "Building [TradingGoose-Market](https://github.com/TradingGoose/TradingGoose-Market): \n Why We Built Our Own Ticker Identity System"
 description: "How building data connectors across Alpaca, Yahoo Finance, and Finnhub revealed a fragmented ticker identity problem — and why we built an open source, self-hostable canonical market data platform to solve it."
 date: "2026-04-07"
 image: "cover.png"
