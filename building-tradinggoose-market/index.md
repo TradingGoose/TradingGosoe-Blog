@@ -1,6 +1,6 @@
 ---
-title: "Building [TradingGoose-Market](https://github.com/TradingGoose/TradingGoose-Market): \n Why We Built Our Own Ticker Identity System"
-description: "How building data connectors across Alpaca, Yahoo Finance, and Finnhub revealed a fragmented ticker identity problem — and why we built an open source, self-hostable canonical market data platform to solve it."
+title: "[TradingGoose-Market](https://github.com/TradingGoose/TradingGoose-Market): canonical ticker identity across market data providers"
+description: "How we keep the same stock, currency pair, or crypto pair consistent across Alpaca, Yahoo Finance, Finnhub, and similar providers, plus market grouping, trading hours, and holiday handling."
 date: "2026-04-07"
 image: "cover.png"
 published: true
@@ -15,125 +15,127 @@ authors:
     x: "BruzWJ"
 ---
 
-When we started building TradingGoose, the first thing we needed was market data. Real-time quotes, historical bars, fundamentals — the raw material for any trading application. Simple enough: pick a data provider, call their API, done.
+When we started TradingGoose, the first thing we needed was market data. That sounds simple: pick a provider, call an API, move on.
 
-Except we didn't want to depend on just one provider. We wanted connectors to Alpaca, Yahoo Finance, Alpha Vantage, Finnhub, and more — so users could choose the source that fits their needs, or combine multiple sources for redundancy.
+It stopped being simple as soon as we wanted more than one provider. We wanted connectors for Alpaca, Yahoo Finance, Alpha Vantage, Finnhub, and others so users could switch sources or use more than one source at a time.
 
-That's when we ran into the problem.
+The first problem we ran into was not rate limits or latency. It was identity.
 
-## The Ticker Identity Problem
+## The Cross-Platform Identity Problem
 
-Every data platform has its own naming system for the same asset. Apple stock is `AAPL` on Alpaca, `AAPL` on Yahoo Finance — easy. But step outside US equities and things fall apart fast.
+Every provider names the same asset differently. US equities are the easy case. Outside that, the mapping gets messy fast.
 
-A stock listed on the Shanghai Stock Exchange might be:
+A Shanghai listing might be:
+
 - `601988.SS` on Yahoo Finance
 - `601988.SHG` on Finnhub
-- `601988` on Alpha Vantage (with a separate exchange parameter)
+- `601988` on Alpha Vantage, with the exchange passed separately
 
-Forex is another mess — the EUR/USD pair is `EURUSD=X` on Yahoo Finance, but `OANDA:EUR_USD` on Finnhub, with a completely different prefix and delimiter. Crypto is worse — Bitcoin against USD could be `BTC/USD` on Alpaca, `BTC-USD` on Yahoo, `BINANCE:BTCUSD` on Finnhub, or `BTCUSD` on Alpha Vantage.
+Forex is similar:
 
-Some platforms use postfixes to indicate asset type: `^` for indices, `.ETF` suffixes, `=X` for forex pairs. Some prepend exchange identifiers like `OANDA:EUR_USD`. Some use no delimiter at all.
+- `EURUSD=X` on Yahoo Finance
+- `OANDA:EUR_USD` on Finnhub
 
-When you're building a universal data connector that hooks into multiple sources, you need a single canonical identity for each asset — and a reliable way to translate that identity into whatever format each platform expects. Without it, you're maintaining a tangled mess of per-platform, per-asset-class string manipulation that breaks every time a provider changes their format.
+Crypto is worse:
 
-## How Existing Projects Handle This
+- `BTC/USD` on Alpaca
+- `BTC-USD` on Yahoo Finance
+- `BINANCE:BTCUSD` on Finnhub
+- `BTCUSD` on Alpha Vantage
 
-We weren't the first to face this. Two major open-source projects tackle ticker identity at scale: CCXT (for crypto exchanges) and QuantConnect's LEAN engine (for multi-asset algorithmic trading).
+Some providers use postfixes like `^`, `.ETF`, or `=X`. Some prepend exchange identifiers like `OANDA:`. Some remove delimiters entirely.
 
-### CCXT: Per-Exchange Currency Dictionaries
+Once you support more than one source, string munging stops being a detail and becomes the thing you spend time debugging.
 
-CCXT normalizes crypto trading pairs into a unified `BASE/QUOTE` format — `BTC/USDT` regardless of whether the exchange uses `BTCUSDT` (Binance), `XXBTUSDT` (Kraken with X/Z prefixes), `tBTCUSD` (Bitfinex with t-prefix), or `BTC_USDT` (Poloniex with underscores).
+What we wanted was one shared identity per listing, plus a way to translate that identity into whatever each provider expects.
 
-Each exchange class maintains a hardcoded `commonCurrencies` dictionary that maps non-standard codes to canonical ones. Kraken alone has 30+ entries mapping things like `XXBT→BTC`, `XETH→ETH`, `ZEUR→EUR`. Bitfinex maps deprecated codes like `UST→USDT` and `LUNA→LUNC`. Every exchange fork or upgrade requires manual updates to these dictionaries.
+The part that ended up being more useful than plain symbol translation was the rest of the market model around it. We group segment MICs into a single `Market` entity, then keep trading hours, holiday closures, and early closes as structured data. That made the shared identity layer useful as a source of truth, not just a ticker lookup table.
 
-The system works well within the crypto domain, but it has fundamental limitations:
+## What Existing Projects Do
 
-- **Maintenance is manual and per-exchange.** There's no systematic way to discover new aliases — someone has to notice and add them.
-- **Market ID conflicts are common.** Multiple market types (spot, futures, perpetuals) can share the same exchange ID like `BTCUSDT`. CCXT resolves this with a global `defaultType` option, which means switching between spot and derivatives requires changing global state.
-- **It's crypto-only.** The entire architecture assumes a `BASE/QUOTE` pair structure. Traditional equities, forex, indices, and ETFs have fundamentally different identification patterns that don't fit this model.
-- **No persistent identity layer.** Everything is resolved at runtime from exchange API responses. There's no database, no admin interface, no way to curate or override mappings through a UI.
+We were not the first people to hit this problem.
 
-### LEAN: Bit-Packed Security Identifiers
+### CCXT
 
-QuantConnect's LEAN takes the opposite approach — engineering a permanent, immutable identifier for every security. Their `SecurityIdentifier` packs the security type, market code, strike price, option style, expiry date, and put/call flag into a single 64-bit integer using nested modulo offsets. The `Symbol` class wraps this with a human-readable `Value` (the current ticker) that can change over time while the underlying ID stays constant.
+CCXT normalizes crypto pairs into `BASE/QUOTE`. That gives you a common shape across exchanges, but it still relies on per-exchange dictionaries for odd codes and manual updates when an exchange changes something.
 
-For handling ticker changes and delistings, LEAN uses CSV "map files" — one per security — that record which ticker was valid on which date:
+That works inside crypto. It does not give you:
 
-```
-20150101,CHASE,
-20150715,JPM,NYSE
-20200101,DELISTED,
-```
+- a model for equities, forex, indices, or ETFs
+- a persistent identity layer
+- a UI for curating mappings
+- a self-hostable service for the rest of the stack
 
-Brokerage integration happens through `ISymbolMapper`, an interface each brokerage implements to convert between LEAN symbols and brokerage-specific tickers. A central `SymbolPropertiesDatabase` CSV maps `market × symbol × securitytype` to properties including an optional `MarketTicker` field for brokerage-specific overrides.
+It also leans on global market settings in places like spot versus derivatives, which gets awkward when the same exchange ID can map to more than one market type.
 
-The system is thorough, but the cost is complexity:
+### LEAN
 
-- **42 hardcoded markets** defined as integer constants — adding a new market requires recompilation.
-- **~50 hardcoded exchange definitions** as static fields, each manually mapping name, code, market, and security type.
-- **Map files must be manually maintained** for every symbol change, delisting, and corporate action.
-- **The `SymbolPropertiesDatabase` CSV has thousands of entries** with optional `MarketTicker` fields, many of which are empty — meaning brokerage symbol mapping coverage is incomplete.
-- **No universal identifier integration.** CUSIP, ISIN, and FIGI are only available through a lazy-loaded resolver, not part of the canonical identity.
+LEAN goes in the opposite direction. It gives every security an immutable `SecurityIdentifier`, then uses map files and brokerage-specific mappers to translate between canonical symbols and platform tickers.
 
-Both CCXT and LEAN solve real problems, but neither gives you a **manageable, self-hostable system** where you can curate ticker identities through a UI, define platform-specific mapping rules, and serve canonical data through an API.
+That is a solid design, but it still comes with a lot of manual structure:
 
-## Why Off-the-Shelf Services Don't Work Either
+- hardcoded market definitions
+- hardcoded exchange definitions
+- per-symbol map files for changes and delistings
+- large CSV tables with a lot of empty override fields
+- no built-in universal identifier resolver in the core identity layer
 
-We also looked at hosted solutions:
+Both systems solve real problems. Neither gave us a manageable, self-hostable place to curate identity across asset classes and data sources.
 
-**OpenFIGI** is the closest to what we needed — a free, global identifier mapping service maintained by Bloomberg. But it's not open source, you can't self-host it, and its rate limits (currently 25 requests per minute for unauthenticated, 250 for authenticated) make it impractical for high-volume applications that need to resolve thousands of tickers during startup or bulk imports. You're also dependent on Bloomberg's infrastructure and data coverage decisions.
+## Why Hosted Services Were Not Enough
 
-![OpenFIGI — free and flexible, but not open source and rate-limited for high-volume use](./OpenFigi.png)
+We also looked at hosted options.
 
-**FinnWorlds** offers comprehensive market data APIs including exchange and listing metadata. But after a discounted first month ($9–$99), regular pricing kicks in at $99/month (Individual), $100/month (Starter), $400/month (Developers), and $1,100/month (Enterprise) — costs that add up quickly for personal projects, indie traders, or small teams who just need canonical ticker identity. It's also closed-source, so you can't customize the data model or add mapping rules for niche platforms.
+OpenFIGI was the closest fit for identity mapping, but it is still a hosted service. We wanted something we could own, extend, and adapt to our own data model.
 
-![FinnWorlds pricing — four tiers from $99/month to $1,100/month after the first discounted month](./finnworldsPricing.png)
+FinnWorlds has useful market metadata, but the closed-source constraints made it a poor fit for a small self-hosted system.
 
-We found that **no single open-source project exists** that handles canonical ticker identity management with customizable cross-platform mapping rules and provides a single source of truth you can self-host.
+The issue was not feature count. It was control. We did not want the core identity layer to depend on someone else's limits, schema choices, or uptime.
+
+![OpenFIGI works for lookup, but it is still a hosted service, not something we can self-host](./OpenFigi.png)
+
+![FinnWorlds exposes market metadata, but it is still a closed service](./finnworldsPricing.png)
+
+We did not find an open-source project that covered the full shape we wanted.
 
 ## How We Designed It
 
 ### First Attempt: MIC-Based Exchange Mapping
 
-Our initial design centered on the **Market Identifier Code (MIC)** — the ISO 10383 standard maintained by SWIFT that assigns a unique code to every trading venue worldwide. Under this standard, every exchange has an **operating MIC** (the legal entity that operates the venue) and one or more **segment MICs** (specific trading segments or platforms within that venue). For example, `XNYS` is the operating MIC for New York Stock Exchange, Inc. Under it sit 11 segment MICs: `ARCX` (NYSE Arca), `XASE` (NYSE American), `XCHI` (NYSE Texas), `ARCO` (NYSE Arca Options), `AMXO` (NYSE American Options), `NYSD` (NYSE Dark), and more — each representing a distinct trading venue operated by the same entity.
+Our first design centered on the Market Identifier Code (MIC) standard. Every exchange has an operating MIC, and many have segment MICs underneath it. That gives you a real-world anchor for mapping listings, trading hours, and geographic metadata.
 
-The idea was straightforward: map each data source's exchange identifier to one or more MICs, then map specific tickers under each MIC. For outbound requests (asking a data source for data), we'd resolve `canonical ticker → MIC → data source exchange → platform-specific symbol`. For inbound data (receiving data from a source), we'd reverse it: `platform symbol → data source exchange → MIC → canonical ticker`.
+The problem is that MICs are more granular than we needed. Many segment MICs under the same operating MIC share the same hours, the same location, and the same practical behavior. Treating each segment separately added work without changing the result.
 
-This gave every asset a canonical identity anchored to a real-world standard. We could reuse the same pattern to store and manage trading hours per MIC, market holidays, and timezone associations.
+So we introduced a `Market` entity: a higher-level grouping with a short code like `NYSE`, `NASDAQ`, `LSE`, or `SHG`. The loader finds the operating MIC, walks the parent tree, collects the descendants, and assigns them to the same market.
 
-### The Simplification: Markets Over MICs
+That simplified the model to `listing -> market -> data source` instead of `listing -> MIC -> data source`. The individual MICs still exist and are queryable, but trading hours and mapping rules operate at the market level.
 
-But we quickly realized that many segment MICs under a single operating MIC share the same properties. NYSE's 11 segment MICs all share the same trading hours, the same geographic location (New York), the same timezone, and the same ticker suffixes across data platforms. Configuring trading hours, geo-location, and mapping rules for each segment MIC independently was redundant busywork.
+### Move Provider-Specific Formatting to the Client
 
-We introduced a **Market** entity — a higher-level grouping defined by a short code (e.g., `NYSE`, `NASDAQ`, `LSE`, `SHG`) that maps to an operating MIC and absorbs all its segment MICs. The load process works by finding the operating MIC exchange record, walking up to the root of the parent hierarchy, collecting all descendants, and assigning every exchange in that tree to the same market. Instead of mapping `listing → MIC → data source`, we simplified to `listing → market → data source` and `data source → market → listing`. One fewer level of indirection.
+The next design choice was the boundary between server and client.
 
-The individual MICs are still stored and queryable — the `exchanges` table retains every MIC with its `isSegment` flag and `parentId` reference. But the mapping logic, trading hours, and geographic metadata all operate at the market level. Configure once per market, apply to all its MICs.
+At first, we planned to let TradingGoose Market translate `AAPL` into `AAPL.US` for Finnhub, `0700.HK` for Yahoo Finance, and so on. That turned out to be the wrong boundary. The server should know what a listing is. The client should know how a provider spells it.
 
-### Moving Mapping Rules to the Client
+Provider-specific formatting changes when you add or remove a source, and different clients may use different providers. So we moved symbol rules out of the server and into the client.
 
-We originally planned to handle cross-platform symbol mapping inside TradingGoose Market itself — the server would know how to translate `AAPL` into `AAPL.US` for Finnhub or `0700.HK` for Yahoo Finance.
-
-But we realized this was the wrong boundary. The canonical identity service should be concerned with **what exists** (which listings, on which markets, with which attributes), not with **how each data platform formats its symbols**. Platform-specific formatting is a concern of the client consuming the data — it changes when you add a new provider, and different clients might connect to different providers.
-
-So we moved the mapping rules to the client side. In TradingGoose Studio, each data provider defines a set of **symbol rules** — declarative objects with conditional scope fields and a template string:
+In TradingGoose Studio, each data provider defines a set of symbol rules:
 
 ```typescript
 interface MarketSymbolRule {
-  assetClass?: AssetClass  // 'stock' | 'etf' | 'crypto' | 'currency' | ...
-  market?: string          // Market code: 'NYSE', 'HKEX', 'SHG', ...
-  country?: string         // ISO country: 'HK', 'DE', 'CN', ...
-  city?: string            // City name: 'SHANGHAI', 'SHENZHEN', ...
-  currency?: string        // Quote currency: 'USD', 'EUR', ...
-  regex?: string           // Optional regex tested against source symbol
-  template: string         // Output template with {variable} placeholders
-  active?: boolean         // Toggle rule on/off
+  assetClass?: AssetClass;
+  market?: string;
+  country?: string;
+  city?: string;
+  currency?: string;
+  regex?: string;
+  template: string;
+  active?: boolean;
 }
 ```
 
-Each provider registers an array of these rules plus a **precedence configuration** that controls how rules are ranked per asset class:
+Each provider also registers a precedence list that tells the matcher which fields matter most for a given asset class:
 
 ```typescript
-// Precedence determines which scope fields carry the most weight when scoring
 rulePrecedence: {
   default: ['market', 'currency', 'assetClass', 'country', 'city', 'listing'],
   stock:   ['market', 'currency', 'country', 'city', 'listing'],
@@ -142,86 +144,85 @@ rulePrecedence: {
 }
 ```
 
-Notice how `stock` precedence puts `market` first — because for equities, the exchange matters most. But `crypto` and `currency` precedence puts `currency` first — because pairs are fundamentally defined by their quote denomination.
+For equities, `market` usually matters most. For crypto and currency pairs, `currency` often matters more. The scorer uses that ordering to pick the most specific match.
 
 #### How Rule Resolution Works
 
-When Studio needs to fetch data for a listing, it runs a four-step pipeline:
+When Studio needs data for a listing, it runs four steps:
 
-**Step 1 — Build context.** The listing's metadata is resolved from TradingGoose Market into a `ListingContext`: base ticker, quote currency, asset class, market code, country code, and city name. The provider's `marketToExchangeCode` map converts the market code into a platform-specific exchange code and suffix (e.g., market `NYSE` → exchange code `N` → suffix `.N`).
+1. Build a `ListingContext` from the stored listing record.
+2. Filter active rules that match the scope fields.
+3. Score the matches by precedence.
+4. Render the winning template.
 
-**Step 2 — Filter matching rules.** Every active rule is tested against the context. Each scope field in a rule acts as a filter — if a rule specifies `market: 'HKEX'`, it only matches when the listing's market is HKEX. If a rule specifies `city: 'SHANGHAI'` and `assetClass: 'stock'`, both must match. A rule with no scope fields matches everything (it's the catch-all fallback). If a `regex` field is present, it's tested against a source symbol string built from the context — for stocks this is just the base ticker, for crypto it's `{base}-{quote}`, for currency it's `{base}{quote}`.
+The score is simple: for each scope field a rule specifies, add `precedence.length - index` where `index` is that field's position in the precedence list. Fields earlier in the list carry more weight. A `regex` rule gets a small tiebreaker bonus.
 
-**Step 3 — Score and rank.** Each matching rule is scored based on the precedence configuration for the current asset class. The score formula: for each scope field the rule specifies, add `precedence.length - index` where `index` is that field's position in the precedence array. Fields earlier in the precedence array carry more weight. Rules with a `regex` field get a +0.5 tiebreaker bonus.
+For stock precedence `['market', 'currency', 'country', 'city', 'listing']`, the numbers look like this:
 
-For example, with stock precedence `['market', 'currency', 'country', 'city', 'listing']` (length 5):
+| Rule | Score |
+|------|------:|
+| `{ market: 'NYSE', template: '{base}' }` | 5 |
+| `{ country: 'HK', template: '{base}.HK' }` | 3 |
+| `{ market: 'HKEX', country: 'HK', template: '{base}.HK' }` | 8 |
+| `{ template: '{base}' }` | 0 |
 
-| Rule | Score calculation | Total |
-|------|------------------|-------|
-| `{ market: 'NYSE', template: '{base}' }` | market(5) | 5 |
-| `{ country: 'HK', template: '{base}.HK' }` | country(3) | 3 |
-| `{ market: 'HKEX', country: 'HK', template: '{base}.HK' }` | market(5) + country(3) | 8 |
-| `{ template: '{base}' }` | (no fields) | 0 |
-
-The rule with the highest score wins. This means a rule that specifies both `market` and `country` will always beat a rule that specifies only `market`, which will always beat the catch-all.
-
-**Step 4 — Render template.** The winning rule's template is interpolated with context values. Available variables: `{base}`, `{quote}`, `{exchangeCode}`, `{exchangeSuffix}`, `{country}`, `{city}`, `{market}`, `{assetClass}`, and `{listing}`. If no rules match or the template renders empty, a built-in fallback kicks in: crypto defaults to `{base}-{quote}`, currency to `{base}{quote}=X`, and everything else to `{base}{exchangeSuffix}` or just `{base}`.
+The highest score wins. A rule that specifies both `market` and `country` beats a rule that only specifies `market`, which beats the catch-all fallback.
 
 #### Rules in Practice
 
-Here's what the rules look like across three providers — same assets, different output:
+Here is the same listing rendered three different ways:
 
 ```typescript
 // Yahoo Finance
-{ city: 'SHANGHAI', template: '{base}.ss' }                       // 601988 → 601988.ss
-{ city: 'SHENZHEN', template: '{base}.sz' }                       // 000858 → 000858.sz
-{ assetClass: 'stock', market: 'HKEX', template: '{base}.HK' }   // 0700 → 0700.HK
-{ assetClass: 'etf', country: 'DE', template: '{base}.DE' }      // EWG → EWG.DE
-{ assetClass: 'crypto', template: '{base}-{quote}' }              // BTC → BTC-USD
-{ assetClass: 'currency', template: '{base}{quote}=X' }           // EUR → EURUSD=X
-{ assetClass: 'stock', market: 'TO', template: '{base}.TO' }     // RY → RY.TO
-{ template: '{base}' }                                            // AAPL → AAPL (fallback)
+{ city: 'SHANGHAI', template: '{base}.ss' }                     // 601988 -> 601988.ss
+{ city: 'SHENZHEN', template: '{base}.sz' }                     // 000858 -> 000858.sz
+{ assetClass: 'stock', market: 'HKEX', template: '{base}.HK' }  // 0700 -> 0700.HK
+{ assetClass: 'crypto', template: '{base}-{quote}' }            // BTC -> BTC-USD
+{ assetClass: 'currency', template: '{base}{quote}=X' }         // EUR -> EURUSD=X
+{ template: '{base}' }                                          // AAPL -> AAPL
 
 // Finnhub
-{ assetClass: 'currency', template: 'OANDA:{base}_{quote}' }     // EUR → OANDA:EUR_USD
-{ assetClass: 'crypto', template: 'BINANCE:{base}{quote}' }      // BTC → BINANCE:BTCUSD
-{ market: 'NYSE', template: '{base}' }                            // AAPL → AAPL
-{ market: 'NASDAQ', template: '{base}' }                          // MSFT → MSFT
-{ template: '{base}{exchangeSuffix}' }                             // VOD → VOD.L (fallback)
+{ assetClass: 'currency', template: 'OANDA:{base}_{quote}' }    // EUR -> OANDA:EUR_USD
+{ assetClass: 'crypto', template: 'BINANCE:{base}{quote}' }     // BTC -> BINANCE:BTCUSD
+{ market: 'NYSE', template: '{base}' }                          // AAPL -> AAPL
+{ template: '{base}{exchangeSuffix}' }                          // VOD -> VOD.L
 
 // Alpaca
-{ assetClass: 'crypto', template: '{base}/{quote}' }              // BTC → BTC/USD
-{ market: 'NYSE', template: '{base}' }                            // AAPL → AAPL
-{ market: 'NASDAQ', template: '{base}' }                          // MSFT → MSFT
-{ template: '{base}' }                                            // (fallback)
+{ assetClass: 'crypto', template: '{base}/{quote}' }            // BTC -> BTC/USD
+{ market: 'NYSE', template: '{base}' }                          // AAPL -> AAPL
+{ template: '{base}' }                                          // fallback
 ```
 
-The same listing — say, Bitcoin quoted in USD — resolves to `BTC-USD` for Yahoo, `BINANCE:BTCUSD` for Finnhub, and `BTC/USD` for Alpaca. The canonical identity (`TG_LSTG_XXXX`, base: `BTC`, quote: `USD`, assetClass: `crypto`) stays the same. Only the final rendered symbol changes per provider.
+The same listing - say, Bitcoin quoted in USD - resolves to `BTC-USD` for Yahoo, `BINANCE:BTCUSD` for Finnhub, and `BTC/USD` for Alpaca. The shared identity stays the same. Only the rendered symbol changes per provider.
 
-#### Why Inbound Data Doesn't Need Reverse Mapping
+#### Why Inbound Data Does Not Need Reverse Mapping
 
-The key insight is that **the original canonical context is preserved throughout the request/response cycle**. When Studio sends a request for `601988.ss` to Yahoo Finance, it already knows this is listing `TG_LSTG_XXXX` with base `601988` on the Shanghai market. The response data — price bars, volume, timestamps — is associated back to the canonical listing directly. There's no need to parse `601988.ss` and reverse-engineer which listing it belongs to.
+The key point is that the shared context stays intact throughout the request/response cycle.
 
-This means adding a new data provider requires zero changes to TradingGoose Market. You define a new set of rules and exchange code mappings in your client, and the canonical identity layer stays untouched.
+When Studio sends a request for `601988.ss` to Yahoo Finance, it already knows that the request came from listing `TG_LSTG_XXXX`. The response data is attached back to that listing directly. There is no need to parse `601988.ss` and infer what it meant.
 
-## What TradingGoose Market Is Now
+That means adding a new provider does not require changes in TradingGoose Market. You define a new set of rules in the client, and the shared identity layer stays untouched.
 
-**TradingGoose Market is a self-hostable, open canonical market data platform that provides a single source of truth for listing identity, exchange metadata, and market reference data — designed so any trading application can resolve, search, and manage tickers consistently across data sources with configurable mapping rules.**
+## What TradingGoose Market Does Now
 
-It manages eleven entity types — listings, exchanges, markets, cryptocurrencies, currencies, countries, cities, timezones, blockchain networks, and trading hours — through both an admin dashboard and a versioned public API.
+TradingGoose Market is a self-hostable market-data service with a shared identity layer. It stores listings, exchanges, markets, cryptocurrencies, currencies, countries, cities, timezones, blockchain networks, and trading hours, and exposes them through an admin UI and a versioned API.
 
-![The listings table in TradingGoose Market — browsing stocks across US and international markets with icons, asset class, country, quote currency, and market assignments](./listings-table.png)
+![The listings table in TradingGoose Market, showing asset class, country, quote currency, and market assignments](./listings-table.png)
 
-The tech stack is deliberately simple: Next.js 16 on Bun, PostgreSQL with Drizzle ORM, Better Auth for sessions, and shadcn/ui for the admin interface. One deployable unit, one database, minimal operational overhead.
+The current stack is straightforward: Next.js 16 on Bun, PostgreSQL with Drizzle, Better Auth for sessions, and shadcn/ui for the admin interface.
 
 ### Beyond Ticker Identity: Trading Hours, Holidays, and Early Closes
 
-Once we had a relational system linking listings to markets, countries, cities, and timezones, we realized it could manage more than just ticker identity. Trading hours are a natural extension — they're tied to the same market entity, and every trading application eventually needs to know when a market is open.
+Once we had a relational system linking listings to markets, countries, cities, and timezones, trading hours became the next obvious thing to store.
 
-TradingGoose Market stores trading hours as structured data: regular sessions by day of week, holiday closures, and early close dates with their shortened hours. The admin UI provides a visual weekly calendar where you can drag and configure sessions for each market, scoped by country, asset class, or even individual listing when needed (e.g., futures on CBOE have different hours than equities).
+TradingGoose Market keeps regular sessions, holiday closures, and early closes as structured data. The admin UI shows a weekly calendar for each market, and overrides can be scoped by market, country, asset class, or even a single listing when needed.
 
-![Editing market hours in TradingGoose Market — regular sessions shown as a visual weekly calendar, with holidays and early closes managed alongside](./edit-markethour.png)
+![Editing market hours in TradingGoose Market, with regular sessions shown as a weekly calendar and holiday rules managed alongside](./edit-markethour.png)
 
-This is another area where the market-level grouping pays off. Instead of maintaining separate trading hour records for every segment MIC under NYSE, you configure it once for the NYSE market and it applies everywhere. If a specific asset class has different hours (like futures trading extended sessions), you add an override scoped to that asset class — the system resolves the most specific match.
+The market-level grouping matters here too. Instead of maintaining a separate schedule for every segment MIC under NYSE, we configure the market once and apply it everywhere. If a specific asset class needs different hours, we add a narrower override and let the resolver pick the most specific match.
 
-For teams and individuals building trading applications that connect to multiple data sources, TradingGoose Market eliminates the fragmented ticker identity problem. You curate your listings once, define your mapping rules per platform, and every service in your stack speaks the same language. It's easy to scale, straightforward to manage, and affordable to run — because you host it yourself.
+## Closing
+
+The tradeoff is simple: we take on the database and admin UI ourselves, but we keep the shared identity layer under our control.
+
+For anything that talks to more than one market data provider, that has turned out to be the part worth keeping boring.
